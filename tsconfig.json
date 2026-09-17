@@ -1,0 +1,1 @@
+{"compilerOptions":{"target":"ES2023","lib":["ES2023","DOM"],"module":"NodeNext","moduleResolution":"NodeNext","strict":true,"esModuleInterop":true,"skipLibCheck":true,"resolveJsonModule":true,"jsx":"react-jsx","outDir":"dist/server","rootDir":"."},"include":["src/server/**/*.ts","src/shared/**/*.ts","src/client/**/*.tsx","src/client/**/*.ts","tests/**/*.ts"]}
