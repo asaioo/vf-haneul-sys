@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { GitHubProvider, coordinationMarker } from '../src/server/github.js';
+import { applicableScopedPolicies, GitHubProvider, coordinationMarker } from '../src/server/github.js';
 import { config } from '../src/server/config.js';
 import { demoSha, fixtureChange } from '../src/server/demo.js';
 import type { Project } from '../src/shared/types.js';
@@ -10,6 +10,11 @@ const cfg={...config({},true),demo:false,privateKey:key,clientId:'client',client
 const base=demoSha(1),head=demoSha(2),prHead=demoSha(3),direct=demoSha(4);
 const project:Project={repo_id:'101',installation_id:'201',full_name:'owner/private',url:'https://github.com/owner/private',integration_branch:'main',default_branch:'main',prefix:'TASK',sequence:0,confirmed:true,init:'ready',last_sync:Date.now(),checkpoint:base,error:null,coverage_start:Date.now(),gaps:[]};
 const repo={id:101,private:true,full_name:'owner/private',html_url:'https://github.com/owner/private',default_branch:'main',permissions:{pull:true}};
+
+test('changed paths load only applicable scoped AGENTS.md files', () => {
+  const inventory = new Set(['src/AGENTS.md', 'src/server/AGENTS.md', 'other/AGENTS.md']);
+  assert.deepEqual(applicableScopedPolicies(['src/server/app.ts', 'README.md'], inventory), ['src/AGENTS.md', 'src/server/AGENTS.md']);
+});
 const wireCommit=(sha:string)=>({sha,commit:{message:'[TASK-1] change'},author:{id:1},html_url:`https://github.com/owner/private/commit/${sha}`});
 const wirePr={number:1,id:55,title:'TASK-1 Implement feature',body:'Task: TASK-1',head:{sha:prHead,ref:'feature/work',repo:{id:101}},base:{sha:base,ref:'main',repo:{id:101}},user:{id:1},state:'closed',merged:true,merged_at:new Date().toISOString(),merge_commit_sha:head,draft:false,commits:1,changed_files:1,updated_at:new Date().toISOString(),html_url:'https://github.com/owner/private/pull/1'};
 function transport(options:{partial?:boolean;missing?:boolean;empty?:boolean;treeTruncated?:boolean;direct?:boolean;failPr?:boolean;native?:boolean}={}) {
@@ -133,6 +138,28 @@ test('app-owned coordination comments are idempotent, update in place, and rejec
   await gh.maintainComment(change,body.replace('Updated','Changed'));assert.equal(patches,1);
   comments.splice(0,comments.length,{id:902,body:coordinationMarker('101',1)+'\nspoof',user:{id:777,login:'human',type:'User'}});
   await assert.rejects(()=>gh.maintainComment(change,body),/unverified human/);assert.equal(posts,1);
+});
+
+
+test('Main Agent PR reviews are App-authored and idempotent', async () => {
+  const reviews: any[] = []; let posts = 0;
+  const http: typeof fetch = async (input, init: any = {}) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/app/installations/201/access_tokens') return new Response(JSON.stringify({ token: 'installation-token', expires_at: new Date(Date.now() + 3_600_000).toISOString() }));
+    if (path === '/app') return new Response(JSON.stringify({ id: 777, slug: 'kapo' }));
+    if (path === '/repositories/101') return new Response(JSON.stringify(repo));
+    if (path === '/repos/owner/private/branches/main') return new Response(JSON.stringify({ commit: { sha: head } }));
+    if (path === '/repos/owner/private/pulls/4/reviews' && (!init.method || init.method === 'GET')) return new Response(JSON.stringify(reviews));
+    if (path === '/repos/owner/private/pulls/4/reviews' && init.method === 'POST') {
+      posts++; const request = JSON.parse(init.body); const review = { id: 950, body: request.body, state: 'APPROVED', user: { id: 888, login: 'kapo[bot]', type: 'Bot' } }; reviews.push(review); return new Response(JSON.stringify(review), { status: 200 });
+    }
+    throw new Error(`Unexpected review fixture request ${String(input)}`);
+  };
+  const provider = new GitHubProvider({ ...cfg, projectNodeId: 'PVT_1' }, http);
+  const body = '<!-- vf-kapo:main-review:101:fixture -->\nApproved';
+  await provider.maintainGovernanceReview(4, body, 'APPROVE');
+  await provider.maintainGovernanceReview(4, body, 'APPROVE');
+  assert.equal(posts, 1);
 });
 
 

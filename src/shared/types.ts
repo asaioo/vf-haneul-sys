@@ -162,6 +162,7 @@ export interface Job { id: string; type: string; payload: string; state: 'queued
 
 
 export type GovernanceDecision = 'no_change' | 'fix_code' | 'update_rules';
+export type GovernanceReviewKind = 'merged_policy' | 'issue' | 'pull_request';
 export type GovernanceRequestState = 'queued' | 'running' | 'diagnostic' | 'not_configured' | 'result' | 'proposal';
 
 /** A durable, immutable-identity governance request created by a signed GitHub event. */
@@ -169,6 +170,8 @@ export interface GovernanceRequest {
   id: string;
   /** GitHub delivery identity; distinct label events are deliberate re-requests. */
   delivery_id?: string;
+  /** Defaults to merged_policy for rows created before edge review support. */
+  kind?: GovernanceReviewKind;
   repo_id: string;
   installation_id: string;
   issue_id: string;
@@ -176,6 +179,7 @@ export interface GovernanceRequest {
   issue_body_hash: string;
   requester_id: string;
   requester_login: string;
+  requester_type?: 'User' | 'Bot';
   pr_number: number;
   pr_id: string | null;
   state: GovernanceRequestState;
@@ -193,6 +197,7 @@ export interface GovernanceRequest {
   comment_id: number | null;
   comment_body_hash: string | null;
   error: string | null;
+  review_id?: number | null;
   model_attempts: number;
   attempts: number;
   created_at: number;
@@ -203,6 +208,7 @@ export interface GovernanceIssue {
   id: string;
   repo_id: string;
   number: number;
+  title: string;
   body: string;
   labels: string[];
   author_id: string | null;
@@ -239,6 +245,8 @@ export interface GovernanceEvidence {
   integration_sha: string;
   default_branch: string;
   policy: { sha: string; content: string | null; missing: boolean; truncated: boolean };
+  /** Applicable directory-scoped AGENTS.md files at the pinned integration SHA. */
+  scoped_policies?: { path: string; sha: string; content: string }[];
   pull_request: GovernancePullRequestEvidence;
   complete: boolean;
   warnings: string[];

@@ -12,15 +12,17 @@ export interface Provider {
   repository(): Promise<{ id: string; installation_id: string; full_name: string; url: string; default_branch: string; private: boolean; head_sha: string | null }>;
   snapshot(project: Project, tracked: Change[], hints?: unknown): Promise<SyncSnapshot>;
   maintainComment?(change: Change, body: string): Promise<{ id: number; body: string }>;
-  governanceIssue?(number: number): Promise<GovernanceIssue>;
-  governanceEvidence?(project: Project, number: number): Promise<GovernanceEvidence>;
+  governanceIssue?(number: number, allowPullRequest?: boolean): Promise<GovernanceIssue>;
+  governanceEvidence?(project: Project, number: number, expected?: 'merged' | 'open'): Promise<GovernanceEvidence>;
   governancePermission?(login: string): Promise<GovernancePermission>;
   governanceBaseline?(project: Project): Promise<{ integration_sha: string; policy_sha: string | null }>;
+  governancePolicy?(project: Project): Promise<{ integration_sha: string; policy: GovernanceEvidence['policy'] }>;
   createGovernanceBranch?(name: string, baseSha: string): Promise<GovernanceBranch>;
   updateGovernancePolicy?(branch: string, policySha: string, content: string): Promise<{ sha: string }>;
   governanceDiff?(branch: string, baseSha: string): Promise<GovernanceDiff>;
   createGovernancePullRequest?(input: { branch: string; base: string; title: string; body: string }): Promise<GovernancePullRequestResult>;
   maintainGovernanceComment?(issueNumber: number, body: string): Promise<{ id: number; body: string }>;
+  maintainGovernanceReview?(pullNumber: number, body: string, event: 'APPROVE' | 'REQUEST_CHANGES'): Promise<{ id: number; body: string }>;
 }
 
 export class ProviderError extends Error {
@@ -75,6 +77,18 @@ export function governancePathExcluded(path: string): boolean {
   if (/(^|[/])(node_modules|dist|build|coverage|out|generated|vendor)([/]|$)/i.test(normalized)) return true;
   if (/(^|[/])(.env(?:[.].*)?|.*(?:secret|credential|token|password).*|.*[.](?:pem|key|p12|pfx|crt|cer|jks))$/i.test(normalized)) return true;
   return /[.](?:png|jpe?g|gif|webp|ico|pdf|zip|gz|bz2|7z|tar|wasm|exe|dll|so|dylib|class|jar|bin|db|sqlite|lock)$/i.test(normalized);
+}
+
+export function applicableScopedPolicies(paths: string[], inventory: Set<string>): string[] {
+  const found = new Set<string>();
+  for (const path of paths) {
+    const parts = path.split('/').filter(Boolean);
+    for (let depth = 1; depth < parts.length; depth++) {
+      const candidate = `${parts.slice(0, depth).join('/')}/AGENTS.md`;
+      if (inventory.has(candidate)) found.add(candidate);
+    }
+  }
+  return [...found].sort();
 }
 
 const governanceBranch = (name: string) => /^vf-kapo[/]agents-review-[A-Za-z0-9-]{8,120}$/.test(name);
@@ -510,17 +524,17 @@ export class GitHubProvider implements Provider {
     return { token, repo, root, integrationSha, policy };
   }
 
-  async governanceIssue(number: number): Promise<GovernanceIssue> {
+  async governanceIssue(number: number, allowPullRequest = false): Promise<GovernanceIssue> {
     if (!Number.isSafeInteger(number) || number < 1) throw new ProviderError('Invalid governance Issue number', 422);
     const token = await this.token();
     const { root } = await this.governanceRepository();
     const { data } = await this.request(`${root}/issues/${number}`, token, 'GET');
     const responseRepoId = data?.repository?.id ?? data?.repository_id;
     const responseRepoUrl = data?.repository_url;
-    if (data?.pull_request || !data?.id || responseRepoId != null && String(responseRepoId) !== this.cfg.repoId || responseRepoUrl != null && String(responseRepoUrl) !== `https://api.github.com${root}`) throw new ProviderError('Governance Issue belongs to an unexpected repository', 409);
+    if (!!data?.pull_request !== allowPullRequest || !data?.id || responseRepoId != null && String(responseRepoId) !== this.cfg.repoId || responseRepoUrl != null && String(responseRepoUrl) !== `https://api.github.com${root}`) throw new ProviderError('Governance subject belongs to an unexpected repository or has the wrong type', 409);
     const updated = Date.parse(String(data.updated_at));
     if (!Number.isFinite(updated)) throw new ProviderError('Governance Issue has an invalid timestamp', 409);
-    return { id: String(data.id), repo_id: this.cfg.repoId, number, body: String(data.body ?? ''), labels: Array.isArray(data.labels) ? data.labels.map((label: Json) => String(label?.name ?? '')).filter(Boolean) : [], author_id: data.user?.id == null ? null : String(data.user.id), author_login: data.user?.login == null ? null : String(data.user.login), updated_at: updated };
+    return { id: String(data.id), repo_id: this.cfg.repoId, number, title: String(data.title ?? ''), body: String(data.body ?? ''), labels: Array.isArray(data.labels) ? data.labels.map((label: Json) => String(label?.name ?? '')).filter(Boolean) : [], author_id: data.user?.id == null ? null : String(data.user.id), author_login: data.user?.login == null ? null : String(data.user.login), updated_at: updated };
   }
 
   async governancePermission(login: string): Promise<GovernancePermission> {
@@ -542,16 +556,24 @@ export class GitHubProvider implements Provider {
     return { integration_sha: base.integrationSha, policy_sha: base.policy.missing || base.policy.truncated ? null : base.policy.sha };
   }
 
-  async governanceEvidence(project: Project, number: number): Promise<GovernanceEvidence> {
+  async governancePolicy(project: Project): Promise<{ integration_sha: string; policy: GovernanceEvidence['policy'] }> {
+    const base = await this.governanceBase(project);
+    return { integration_sha: base.integrationSha, policy: base.policy };
+  }
+
+  async governanceEvidence(project: Project, number: number, expected: 'merged' | 'open' = 'merged'): Promise<GovernanceEvidence> {
     const base = await this.governanceBase(project);
     const { data: pull } = await this.request(`${base.root}/pulls/${number}`, base.token, 'GET');
     const warnings: string[] = [];
     let complete = true;
     if (!pull?.id || Number(pull.number) !== number) throw new ProviderError('Governance PR identity mismatch', 409);
     if (String(pull.base?.repo?.id) !== this.cfg.repoId || String(pull.head?.repo?.id) !== this.cfg.repoId) throw new ProviderError('Governance PR must be in the selected repository', 409);
-    if (pull.merged !== true || pull.state !== 'closed' || String(pull.base?.ref) !== project.integration_branch) {
+    const expectedState = expected === 'merged'
+      ? pull.merged === true && pull.state === 'closed'
+      : pull.merged !== true && pull.state === 'open';
+    if (!expectedState || String(pull.base?.ref) !== project.integration_branch) {
       complete = false;
-      warnings.push('Referenced PR is not a merged same-repository PR targeting the integration branch');
+      warnings.push(`Referenced PR is not a ${expected} same-repository PR targeting the integration branch`);
     }
     const title = String(pull.title ?? ''), body = String(pull.body ?? '');
     if (title.length > 20_000 || body.length > 40_000) { complete = false; warnings.push('Referenced PR metadata exceeds the bounded evidence limit'); }
@@ -576,13 +598,30 @@ export class GitHubProvider implements Provider {
       }
       files.push({ path, status: String(value.status ?? 'modified'), patch: omitted ? null : patch && patch.length <= 80_000 ? patch : null, sha: typeof value.sha === 'string' ? value.sha : null, omitted });
     }
+    const { data: tree } = await this.request(`${base.root}/git/trees/${base.integrationSha}?recursive=1`, base.token, 'GET', undefined, true);
+    if (!Array.isArray(tree?.tree) || tree.truncated) { complete = false; warnings.push('Scoped AGENTS.md inventory is incomplete'); }
+    const inventory = new Set<string>((Array.isArray(tree?.tree) ? tree.tree : []).filter((entry: Json) => entry?.type === 'blob').map((entry: Json) => String(entry.path ?? '')));
+    const scopedPaths = applicableScopedPolicies(files.map(file => file.path), inventory);
+    if (scopedPaths.length > 100) throw new ProviderError('Applicable scoped AGENTS.md files exceed the bounded limit');
+    const scopedPolicies: NonNullable<GovernanceEvidence['scoped_policies']> = [];
+    let scopedBytes = 0;
+    for (const path of scopedPaths) {
+      const encoded = path.split('/').map(encodeURIComponent).join('/');
+      const { data } = await this.request(`${base.root}/contents/${encoded}?ref=${encodeURIComponent(base.integrationSha)}`, base.token);
+      if (data?.type !== 'file' || data.encoding !== 'base64' || typeof data.content !== 'string') { complete = false; warnings.push(`Scoped policy ${path} is incomplete`); continue; }
+      const bytes = Buffer.from(data.content, 'base64'); scopedBytes += bytes.length;
+      if (Number(data.size) !== bytes.length || bytes.length > 128_000 || scopedBytes > 512_000) throw new ProviderError('Scoped AGENTS.md content exceeds the bounded limit');
+      let content: string;
+      try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw new ProviderError(`Scoped policy ${path} is not valid UTF-8`, 409); }
+      scopedPolicies.push({ path, sha: sha(data.sha), content });
+    }
     const { data: verify } = await this.request(`${base.root}/pulls/${number}`, base.token, 'GET');
     if (String(verify?.head?.sha) !== String(pull.head?.sha) || String(verify?.updated_at) !== String(pull.updated_at) || String(verify?.base?.sha) !== String(pull.base?.sha) || String(verify?.base?.ref) !== String(pull.base?.ref) || String(verify?.state) !== String(pull.state) || verify?.merged !== pull.merged || String(verify?.title ?? '') !== title || String(verify?.body ?? '') !== body) { complete = false; warnings.push('Referenced PR changed during evidence collection'); }
     const { data: branch } = await this.request(`${base.root}/branches/${encodeURIComponent(project.integration_branch)}`, base.token);
     if (String(branch?.commit?.sha) !== base.integrationSha) { complete = false; warnings.push('Integration branch moved during evidence collection; re-request against the new baseline'); }
     if (base.policy.missing) { complete = false; warnings.push('Root AGENTS.md is missing on the pinned integration baseline'); }
     if (base.policy.truncated) { complete = false; warnings.push('Root AGENTS.md exceeds the bounded limit'); }
-    return { repo_id: this.cfg.repoId, integration_sha: base.integrationSha, default_branch: base.repo.default_branch, policy: base.policy, pull_request: { id: String(pull.id), repo_id: this.cfg.repoId, number, title, body, base_ref: String(pull.base.ref), base_sha: sha(pull.base.sha), head_sha: sha(pull.head.sha), merge_sha: pull.merge_commit_sha ? sha(pull.merge_commit_sha) : null, state: pull.merged === true ? 'merged' : pull.state === 'closed' ? 'closed' : 'open', draft: !!pull.draft, files, commits }, complete, warnings };
+    return { repo_id: this.cfg.repoId, integration_sha: base.integrationSha, default_branch: base.repo.default_branch, policy: base.policy, scoped_policies: scopedPolicies, pull_request: { id: String(pull.id), repo_id: this.cfg.repoId, number, title, body, base_ref: String(pull.base.ref), base_sha: sha(pull.base.sha), head_sha: sha(pull.head.sha), merge_sha: pull.merge_commit_sha ? sha(pull.merge_commit_sha) : null, state: pull.merged === true ? 'merged' : pull.state === 'closed' ? 'closed' : 'open', draft: !!pull.draft, files, commits }, complete, warnings };
   }
 
   async createGovernanceBranch(name: string, baseSha: string): Promise<GovernanceBranch> {
@@ -704,6 +743,24 @@ export class GitHubProvider implements Provider {
     }
     const { data } = await this.request(`${root}/issues/${issueNumber}/comments`, token, 'POST', { body });
     if (!data?.id || typeof data.body !== 'string' || !data.body.includes(marker) || !verifiedCommentAuthor(data.user, app)) throw new ProviderError('Governance comment creation was not verified');
+    return { id: Number(data.id), body: String(data.body) };
+  }
+
+  async maintainGovernanceReview(pullNumber: number, body: string, event: 'APPROVE' | 'REQUEST_CHANGES'): Promise<{ id: number; body: string }> {
+    if (!Number.isSafeInteger(pullNumber) || pullNumber < 1 || typeof body !== 'string' || body.length > 60_000) throw new ProviderError('Invalid governance PR review', 422);
+    const token = await this.token(true);
+    const app = await this.appIdentity();
+    const { root } = await this.governanceRepository();
+    const marker = body.match(/<!-- vf-kapo:main-review:[^>]+ -->/)?.[0];
+    if (!marker) throw new ProviderError('Governance PR review marker is missing', 422);
+    const reviews = await this.pages(`${root}/pulls/${pullNumber}/reviews`, token) as Json[];
+    const marked = reviews.filter(review => typeof review.body === 'string' && review.body.includes(marker));
+    const verified = marked.filter(review => verifiedCommentAuthor(review.user, app));
+    if (marked.length !== verified.length) throw new ProviderError('A Main Agent review marker belongs to an unverified author', 409);
+    if (verified[0]?.id) return { id: Number(verified[0].id), body: String(verified[0].body) };
+    const { data } = await this.request(`${root}/pulls/${pullNumber}/reviews`, token, 'POST', { body, event });
+    const expected = event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED';
+    if (!data?.id || String(data.body ?? '') !== body || String(data.state ?? '').toUpperCase() !== expected || !verifiedCommentAuthor(data.user, app)) throw new ProviderError('Governance PR review response was not verified', 409);
     return { id: Number(data.id), body: String(data.body) };
   }
 }

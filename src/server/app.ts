@@ -11,7 +11,7 @@ import type { Config } from './config.js';
 import { ApiError, requireValue, Store } from './db.js';
 import { coordinate, issueReferences } from './coordinator.js';
 import type { Provider } from './github.js';
-import { GovernanceService, governanceTrigger, GOVERNANCE_JOB } from './governance.js';
+import { edgeReviewTrigger, GovernanceService, governanceTrigger, GOVERNANCE_JOB } from './governance.js';
 import { OpenAIModelClient, type GovernanceModelClient } from './model.js';
 import { changeDetail, completion, createTask, explain, linkTask, patchTask, taskByKey, taskDetail, taskStatus, text } from './tasks.js';
 import { Worker } from './worker.js';
@@ -141,7 +141,7 @@ export async function buildApp(cfg:Config,s:Store,provider:Provider,options:{wor
       let payload:any;try{payload=JSON.parse(raw.toString('utf8'));}catch{throw new ApiError(422,'Invalid JSON');}
       if(String(payload.installation?.id)!==cfg.installationId||payload.repository&&String(payload.repository.id)!==cfg.repoId)throw new ApiError(403,'Webhook identity does not match configured installation/repository');
       if(!payload.repository&&!['installation','installation_repositories','ping'].includes(event))throw new ApiError(422,'Repository identity required');
-      const trigger=event==='issues'&&payload.sender?.type!=='Bot'?governanceTrigger(payload,cfg,id):null;
+      const trigger=governanceTrigger(payload,cfg,id)??edgeReviewTrigger(event,payload,cfg,id);
       const ownGovernanceBotEvent=event==='issues'&&payload.action==='labeled'&&payload.label?.name==='kapo:review-agents'&&payload.sender?.type==='Bot';
       const result=s.tx(()=>{
         const key=`github:${id}`;if(s.get('event_job',key))return {accepted:true,duplicate:true};

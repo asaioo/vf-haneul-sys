@@ -6,7 +6,7 @@ import { Store } from '../src/server/db.js';
 import { buildApp } from '../src/server/app.js';
 import { FakeProvider, demoSha, fixtureChange, seedDemo } from '../src/server/demo.js';
 import { applySnapshot } from '../src/server/coordinator.js';
-import { GOVERNANCE_LABEL, parseAgentsReviewPr, preservesExistingPolicy } from '../src/server/governance.js';
+import { CHANGE_REVIEW_LABEL, edgeReviewTrigger, GOVERNANCE_LABEL, parseAgentsReviewPr, preservesExistingPolicy, TASK_REVIEW_LABEL } from '../src/server/governance.js';
 import { OpenAIModelClient, StaticGovernanceModel, validateGovernanceModelOutput, type GovernanceModelOutput } from '../src/server/model.js';
 
 const cfg = config({}, true);
@@ -41,8 +41,8 @@ function payload(provider: FakeProvider, delivery: string) {
   return { raw: JSON.stringify({ action: 'labeled', label: { name: GOVERNANCE_LABEL }, installation: { id: 201 }, repository: { id: 101 }, sender: { id: 2, login: 'contributor', type: 'User' }, issue: { id: issue.id, number: issue.number, body: issue.body, labels: [{ name: GOVERNANCE_LABEL }] } }), delivery };
 }
 
-async function send(app: any, value: { raw: string; delivery: string }) {
-  return app.inject({ method: 'POST', url: '/webhooks/github', headers: { 'content-type': 'application/json', 'x-github-event': 'issues', 'x-github-delivery': value.delivery, 'x-hub-signature-256': `sha256=${createHmac('sha256', cfg.webhookSecret).update(value.raw).digest('hex')}` }, payload: value.raw });
+async function send(app: any, value: { raw: string; delivery: string }, event = 'issues') {
+  return app.inject({ method: 'POST', url: '/webhooks/github', headers: { 'content-type': 'application/json', 'x-github-event': event, 'x-github-delivery': value.delivery, 'x-hub-signature-256': `sha256=${createHmac('sha256', cfg.webhookSecret).update(value.raw).digest('hex')}` }, payload: value.raw });
 }
 
 test('canonical governance trigger is strict and durable', () => {
@@ -51,6 +51,21 @@ test('canonical governance trigger is strict and durable', () => {
   assert.equal(parseAgentsReviewPr('PR: owner/repo#123'), null);
   assert.equal(parseAgentsReviewPr(' PR: #123'), null);
   assert.equal(parseAgentsReviewPr('PR: #123\n'), null);
+});
+
+
+test('edge review labels create bounded task and pre-merge PR requests', () => {
+  const base = { action: 'labeled', installation: { id: 201 }, repository: { id: 101 }, sender: { id: 2, login: 'contributor', type: 'User' } };
+  const task = edgeReviewTrigger('issues', { ...base, label: { name: TASK_REVIEW_LABEL }, issue: { id: 30, number: 30, body: 'Implement bounded task' } }, cfg, 'edge-task');
+  assert.equal(task?.request.kind, 'issue');
+  assert.equal(task?.request.pr_number, 0);
+  const change = edgeReviewTrigger('pull_request', { ...base, label: { name: CHANGE_REVIEW_LABEL }, pull_request: { id: 31, number: 31, body: 'Task: #30' } }, cfg, 'edge-change');
+  assert.equal(change?.request.kind, 'pull_request');
+  assert.equal(change?.request.pr_number, 31);
+  assert.equal(edgeReviewTrigger('issues', { ...base, action: 'opened', issue: { id: 30, number: 30, body: 'x' } }, cfg, 'not-explicit'), null);
+  const botPayload = { ...base, sender: { id: 9, login: 'edge-bot[bot]', type: 'Bot' }, label: { name: TASK_REVIEW_LABEL }, issue: { id: 32, number: 32, body: 'Agent task' } };
+  assert.equal(edgeReviewTrigger('issues', botPayload, cfg, 'bot-denied'), null);
+  assert.equal(edgeReviewTrigger('issues', botPayload, { ...cfg, governanceAgentLogins: ['edge-bot[bot]'] }, 'bot-allowed')?.request.requester_type, 'Bot');
 });
 
 
@@ -99,6 +114,42 @@ async function drain(built: Awaited<ReturnType<typeof buildApp>>, fixture: Retur
   }
 }
 
+
+test('edge task and open PR label events reach the Main Agent before merge', async () => {
+  for (const kind of ['issue', 'pull_request'] as const) {
+    const fixture = setup({ decision: 'no_change', rationale: 'Compliant with current policy', proposed_agents_md: '' });
+    let event = 'issues';
+    let subject: any;
+    let label = TASK_REVIEW_LABEL;
+    if (kind === 'issue') {
+      fixture.provider.data.issues![0].body = 'Add a focused edge-agent task';
+      fixture.provider.data.issues![0].labels = [TASK_REVIEW_LABEL];
+      fixture.provider.data.issues![0].updated_at = Date.now();
+      subject = { issue: { id: fixture.provider.data.issues![0].id, number: 3, title: fixture.provider.data.issues![0].title, body: fixture.provider.data.issues![0].body, labels: [{ name: label }] } };
+    } else {
+      event = 'pull_request'; label = CHANGE_REVIEW_LABEL;
+      const change = fixture.provider.data.changes[0]; change.state = 'open'; change.merge_sha = null; change.body = 'Task: #3';
+      subject = { pull_request: { id: `101:pr:3`, number: 3, title: change.title, body: change.body, labels: [{ name: label }] } };
+    }
+    const raw = JSON.stringify({ action: 'labeled', label: { name: label }, installation: { id: 201 }, repository: { id: 101 }, sender: { id: 2, login: 'contributor', type: 'User' }, ...subject });
+    const built = await buildApp(cfg, fixture.store, fixture.provider, { worker: false, model: fixture.model });
+    try {
+      const response = await send(built.app, { raw, delivery: `edge-${kind.replace('_', '-')}` }, event);
+      assert.equal(response.statusCode, 202, response.body);
+      assert.equal(response.json().governance, true);
+      await drain(built, fixture);
+      const request = fixture.store.all('governance_request')[0];
+      assert.equal(request.kind, kind);
+      assert.equal(request.state, 'result');
+      assert.equal(request.decision, 'no_change');
+      assert.equal(fixture.model.calls, 1);
+      assert.match(fixture.provider.governanceComments[0].body, kind === 'issue' ? /Task Issue/ : /Open PR/);
+      assert.equal(fixture.provider.governanceReviews.length, kind === 'pull_request' ? 1 : 0);
+      if (kind === 'pull_request') assert.equal(fixture.provider.governanceReviews[0].event, 'APPROVE');
+    } finally { await built.app.close(); fixture.store.close(); }
+  }
+});
+
 test('signed labeled request reaches one offline proposal and duplicate delivery never charges the model twice', async () => {
   const output: GovernanceModelOutput = { decision: 'update_rules', rationale: 'FAKE rationale', proposed_agents_md: additivePolicy('Run focused checks.') };
   const fixture = setup(output);
@@ -119,7 +170,7 @@ test('signed labeled request reaches one offline proposal and duplicate delivery
     assert.equal(fixture.provider.governanceBranches.size, 1);
     assert.equal(fixture.provider.governancePullRequests.length, 1);
     assert.equal(fixture.provider.governanceComments.length, 1);
-    assert.match(fixture.provider.governanceComments[0].body, /Human review and approval/);
+    assert.match(fixture.provider.governanceComments[0].body, /Human or an organization-authorized Agent/);
     const visible = await built.app.inject({ url: '/api/governance', headers: { cookie: `kapo_session=${built.auth.session('1').token}` } });
     assert.equal(visible.statusCode, 200);
     assert.equal(visible.json().items[0].proposal_number, 901);

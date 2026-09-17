@@ -25,6 +25,7 @@ export interface Config {
   governanceModel?: string;
   governanceModelDisableThinking?: boolean;
   governancePrivateCodeOptIn?: boolean;
+  governanceAgentLogins: string[];
 }
 
 export function config(env = process.env, demo = process.argv.includes('--demo')): Config {
@@ -84,9 +85,11 @@ export function config(env = process.env, demo = process.argv.includes('--demo')
     governanceModel: env.GOVERNANCE_MODEL ?? env.OPENAI_MODEL ?? '',
     governanceModelDisableThinking: flag('GOVERNANCE_MODEL_DISABLE_THINKING', false),
     governancePrivateCodeOptIn: flag('GOVERNANCE_PRIVATE_CODE_OPT_IN', false),
+    governanceAgentLogins: (env.GOVERNANCE_AGENT_LOGINS ?? '').split(',').map(value => value.trim()).filter(Boolean),
   };
   if (!/^[A-Z][A-Z0-9]{1,15}$/.test(c.prefix)) throw new Error('Invalid TASK_PREFIX');
   if (!demo && c.webhookSecret.length < 32) throw new Error('Webhook secret must be at least 32 characters');
   if (![c.repoId, c.installationId, c.appId, ...c.bootstrapIds].every(v => /^\d+$/.test(v))) throw new Error('GitHub identities must be numeric IDs');
+  if (!c.governanceAgentLogins.every(value => /^[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/.test(value))) throw new Error('Invalid GOVERNANCE_AGENT_LOGINS');
   return c;
 }

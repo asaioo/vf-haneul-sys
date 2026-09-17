@@ -21,6 +21,7 @@ export class FakeProvider implements Provider {
   access = true;
   failure: Error | null = null;
   governanceComments: { id: number; issue: number; body: string }[] = [];
+  governanceReviews: { id: number; pull: number; body: string; event: 'APPROVE' | 'REQUEST_CHANGES' }[] = [];
   governanceBranches = new Map<string, { sha: string; baseSha: string; policySha: string; content: string }>();
   governancePullRequests: GovernancePullRequestResult[] = [];
   governancePermissions = new Map<string, GovernancePermission>();
@@ -40,11 +41,16 @@ export class FakeProvider implements Provider {
   async snapshot(_project: Project, _tracked: Change[]) { if (this.failure) throw this.failure; const data = structuredClone(this.data); for (const change of data.changes) change.observed_at = Date.now(); for (const issue of data.issues ?? []) issue.updated_at = Date.now(); if (data.project) data.project.fetched_at = Date.now(); return data; }
 
 
-  async governanceIssue(number: number): Promise<GovernanceIssue> {
+  async governanceIssue(number: number, allowPullRequest = false): Promise<GovernanceIssue> {
     if (this.failure) throw this.failure;
+    if (allowPullRequest) {
+      const change = this.data.changes.find(value => value.kind === 'pr' && value.number === number);
+      if (!change) throw new ProviderError('FAKE governance PR not found', 404);
+      return { id: `101:pr:${number}`, repo_id: '101', number, title: change.title, body: change.body, labels: ['kapo:review-change'], author_id: change.actor, author_login: 'Demo Contributor (FAKE)', updated_at: change.observed_at };
+    }
     const issue = this.data.issues?.find(value => value.number === number);
     if (!issue) throw new ProviderError('FAKE governance Issue not found', 404);
-    return { id: issue.id, repo_id: issue.repo_id, number: issue.number, body: issue.body, labels: [...issue.labels], author_id: issue.author, author_login: issue.author === '1' ? 'Demo Developer (FAKE)' : null, updated_at: issue.updated_at };
+    return { id: issue.id, repo_id: issue.repo_id, number: issue.number, title: issue.title, body: issue.body, labels: [...issue.labels], author_id: issue.author, author_login: issue.author === '1' ? 'Demo Developer (FAKE)' : null, updated_at: issue.updated_at };
   }
 
   async governancePermission(login: string): Promise<GovernancePermission> {
@@ -64,7 +70,14 @@ export class FakeProvider implements Provider {
     return { integration_sha: this.data.integration_sha!, policy_sha: policy && !policy.missing && !policy.truncated ? policy.blob_sha : null };
   }
 
-  async governanceEvidence(project: Project, number: number): Promise<GovernanceEvidence> {
+  async governancePolicy(_project: Project): Promise<{ integration_sha: string; policy: GovernanceEvidence['policy'] }> {
+    if (this.failure) throw this.failure;
+    const policy = this.data.context?.documents['AGENTS.md'];
+    if (!policy) throw new ProviderError('FAKE governance policy unavailable', 404);
+    return { integration_sha: this.data.integration_sha!, policy: { sha: policy.blob_sha, content: policy.content, missing: policy.missing, truncated: policy.truncated } };
+  }
+
+  async governanceEvidence(project: Project, number: number, expected: 'merged' | 'open' = 'merged'): Promise<GovernanceEvidence> {
     if (this.failure) throw this.failure;
     const change = this.data.changes.find(value => value.kind === 'pr' && value.number === number);
     const policy = this.data.context?.documents['AGENTS.md'];
@@ -72,7 +85,7 @@ export class FakeProvider implements Provider {
     const files = change.files.map(path => ({ path, status: 'modified', patch: `@@ FAKE patch for ${path} @@\n`, sha: null, omitted: false }));
     const pull = { id: `101:pr:${number}`, repo_id: '101', number, title: change.title, body: change.body, base_ref: change.base_ref, base_sha: change.base_sha, head_sha: change.head_sha, merge_sha: change.merge_sha, state: change.state, draft: change.draft, files, commits: structuredClone(change.commits) } as GovernanceEvidence['pull_request'];
     const warnings: string[] = [];
-    if (change.state !== 'merged' || change.base_ref !== project.integration_branch) warnings.push('FAKE referenced PR is not a merged PR targeting the integration branch');
+    if ((expected === 'merged' ? change.state !== 'merged' : change.state !== 'open') || change.base_ref !== project.integration_branch) warnings.push(`FAKE referenced PR is not a ${expected} PR targeting the integration branch`);
     if (policy.missing) warnings.push('FAKE root AGENTS.md is missing');
     return { repo_id: '101', integration_sha: this.data.integration_sha!, default_branch: this.data.default_branch, policy: { sha: policy.blob_sha, content: policy.content, missing: policy.missing, truncated: policy.truncated }, pull_request: pull, complete: !warnings.length && !!this.data.integration_sha && policy.content !== null && !policy.truncated, warnings };
   }
@@ -126,6 +139,16 @@ export class FakeProvider implements Provider {
     if (existing) { existing.body = body; return { id: existing.id, body }; }
     const value = { id: 10_000 + this.governanceComments.length + 1, issue: issueNumber, body };
     this.governanceComments.push(value);
+    return { id: value.id, body };
+  }
+
+  async maintainGovernanceReview(pullNumber: number, body: string, event: 'APPROVE' | 'REQUEST_CHANGES'): Promise<{ id: number; body: string }> {
+    if (this.failure) throw this.failure;
+    const marker = body.match(/<!-- vf-kapo:main-review:[^>]+ -->/)?.[0];
+    const existing = this.governanceReviews.find(value => marker && value.body.includes(marker));
+    if (existing) return { id: existing.id, body: existing.body };
+    const value = { id: 20_000 + this.governanceReviews.length + 1, pull: pullNumber, body, event };
+    this.governanceReviews.push(value);
     return { id: value.id, body };
   }
 }
