@@ -12,6 +12,7 @@ const snapshot: ContextSnapshot = {
     { path: 'package.json', type: 'blob', sha: 'b'.repeat(40) },
     { path: 'src/app.ts', type: 'blob', sha: 'c'.repeat(40) },
     { path: 'src/AGENTS.md', type: 'blob', sha: 'd'.repeat(40) },
+    { path: '.env', type: 'blob', sha: 'e'.repeat(40) },
   ],
   manifests: ['package.json'],
   scoped_policies: ['src/AGENTS.md'],
@@ -24,6 +25,7 @@ test('repository context maps the complete pinned tree and carries explicit huma
   assert.match(first.markdown, /Baseline SHA: a{40}/);
   assert.match(first.markdown, /src: 2/);
   assert.match(first.markdown, /package\.json/);
+  assert.doesNotMatch(first.markdown, /\.env/);
   first.user_note = 'Authentication is intentionally external.';
   const next = buildRepositoryContext({ ...snapshot, sha: 'e'.repeat(40) }, '101', first);
   assert.equal(next.user_note, first.user_note);

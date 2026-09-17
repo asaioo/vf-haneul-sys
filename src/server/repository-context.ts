@@ -1,4 +1,5 @@
 import type { ContextSnapshot, RepositoryContextDocument } from '../shared/types.js';
+import { governancePathExcluded } from './github.js';
 
 const MAX_CONTEXT_MARKDOWN = 48_000;
 const MAX_DOCUMENT_TEXT = 20_000;
@@ -12,7 +13,7 @@ function counts(values: string[]) {
 /** Deterministic whole-tree map. It is derived context, never repository authority. */
 export function buildRepositoryContext(snapshot: ContextSnapshot, repoId: string, previous?: RepositoryContextDocument): RepositoryContextDocument {
   if (snapshot.truncated || snapshot.codebase_complete !== true) throw new Error('Repository codebase snapshot is incomplete; context cannot be generated');
-  const blobs = snapshot.inventory.filter(entry => entry.type === 'blob').map(entry => entry.path).sort();
+  const blobs = snapshot.inventory.filter(entry => entry.type === 'blob' && !governancePathExcluded(entry.path)).map(entry => entry.path).sort();
   const directories = counts(blobs.map(path => path.includes('/') ? path.split('/')[0] : '(root)'));
   const extensions = counts(blobs.map(path => {
     const name = path.split('/').at(-1) ?? path;
