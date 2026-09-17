@@ -11,6 +11,7 @@
     "dev:client": "vite build --watch",
     "dev:server": "tsx watch src/server/main.ts",
     "start": "tsx src/server/main.ts",
+    "start:prod": "node dist/server/src/server/main.js",
     "demo": "tsx src/server/main.ts --demo",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",

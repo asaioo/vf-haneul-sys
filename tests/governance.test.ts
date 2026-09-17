@@ -15,8 +15,10 @@ const additivePolicy = (rule: string) => `${demoPolicy}\n${rule}\n`;
 
 class CountingModel extends StaticGovernanceModel {
   calls = 0;
+  inputs: string[] = [];
   override async review(input: string, requestId?: string): Promise<GovernanceModelOutput> {
     this.calls++;
+    this.inputs.push(input);
     return super.review(input, requestId);
   }
 }
@@ -143,6 +145,17 @@ test('edge task and open PR label events reach the Main Agent before merge', asy
       assert.equal(request.state, 'result');
       assert.equal(request.decision, 'no_change');
       assert.equal(fixture.model.calls, 1);
+      const modelInput = JSON.parse(fixture.model.inputs[0]);
+      assert.equal(modelInput.repository_context.baseline_sha, fixture.provider.data.integration_sha);
+      assert.match(modelInput.repository_context.markdown, /Repository context/);
+      if (kind === 'pull_request') assert.equal(modelInput.evidence.pull_request.files[0].path, 'src/example.ts');
+      if (kind === 'issue') {
+        const session = built.auth.session('1');
+        const current = (await built.app.inject({ url: '/api/governance/context', headers: { cookie: `kapo_session=${session.token}` } })).json();
+        const corrected = await built.app.inject({ method: 'PUT', url: '/api/governance/context', headers: { cookie: `kapo_session=${session.token}`, origin: cfg.origin, 'x-csrf-token': session.csrf }, payload: { baseline_sha: current.baseline_sha, revision: current.revision, user_note: 'Human correction' } });
+        assert.equal(corrected.statusCode, 200, corrected.body);
+        assert.equal(corrected.json().user_note, 'Human correction');
+      }
       assert.match(fixture.provider.governanceComments[0].body, kind === 'issue' ? /Task Issue/ : /Open PR/);
       assert.equal(fixture.provider.governanceReviews.length, kind === 'pull_request' ? 1 : 0);
       if (kind === 'pull_request') assert.equal(fixture.provider.governanceReviews[0].event, 'APPROVE');
@@ -264,6 +277,9 @@ test('stale model baseline and non-AGENTS diffs never create a draft PR', async 
     await drain(staleBuilt, stale);
     assert.equal(stale.store.all('governance_request')[0].state, 'diagnostic');
     assert.equal(stale.provider.governanceBranches.size, 0);
+    const refreshedContext = { ...stale.provider.data.context!, sha: stale.provider.data.integration_sha! };
+    stale.provider.data.context = refreshedContext;
+    stale.store.put('context_snapshot', refreshedContext.sha, refreshedContext);
     await send(staleBuilt.app, payload(stale.provider, 'governance-stale-retry'));
     await drain(staleBuilt, stale);
     const retried = stale.store.all('governance_request').find(value => value.delivery_id === 'governance-stale-retry');

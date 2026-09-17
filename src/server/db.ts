@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { ActionItem, Change, ContextSnapshot, Explanation, GitHubComment, GitHubIssue, GovernanceRequest, Job, Link, Member, Project, ProjectItem, Task } from '../shared/types.js';
+import type { ActionItem, Change, ContextSnapshot, Explanation, GitHubComment, GitHubIssue, GovernanceRequest, Job, Link, Member, Project, ProjectItem, RepositoryContextDocument, Task } from '../shared/types.js';
 
 type Entities = {
   project: Project;
@@ -11,6 +11,7 @@ type Entities = {
   explanation: Explanation;
   action_item: ActionItem;
   context_snapshot: ContextSnapshot;
+  repository_context: RepositoryContextDocument;
   event_job: Job;
   github_issue: GitHubIssue;
   project_item: ProjectItem;
@@ -30,7 +31,7 @@ export class Store {
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
       INSERT OR IGNORE INTO schema_version VALUES(1);
-      ${['project', 'member', 'task', 'git_change', 'task_change', 'explanation', 'action_item', 'context_snapshot', 'event_job', 'github_issue', 'project_item', 'github_comment', 'governance_request'].map(table => `CREATE TABLE IF NOT EXISTS ${table}(id TEXT PRIMARY KEY, data TEXT NOT NULL CHECK(json_valid(data)));`).join('\n')}
+      ${['project', 'member', 'task', 'git_change', 'task_change', 'explanation', 'action_item', 'context_snapshot', 'repository_context', 'event_job', 'github_issue', 'project_item', 'github_comment', 'governance_request'].map(table => `CREATE TABLE IF NOT EXISTS ${table}(id TEXT PRIMARY KEY, data TEXT NOT NULL CHECK(json_valid(data)));`).join('\n')}
       CREATE UNIQUE INDEX IF NOT EXISTS task_key ON task(json_extract(data,'$.key'));
       CREATE UNIQUE INDEX IF NOT EXISTS change_identity ON git_change(json_extract(data,'$.identity'));
       CREATE UNIQUE INDEX IF NOT EXISTS action_subject ON action_item(json_extract(data,'$.kind'),json_extract(data,'$.subject'));

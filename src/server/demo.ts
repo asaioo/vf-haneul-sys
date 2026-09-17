@@ -1,4 +1,4 @@
-import type { Change, GitHubIssue, GovernanceBranch, GovernanceDiff, GovernanceEvidence, GovernanceIssue, GovernancePermission, GovernancePullRequestResult, Project, ProjectObservation, SyncSnapshot } from '../shared/types.js';
+import type { Change, ContextSnapshot, GitHubIssue, GovernanceBranch, GovernanceDiff, GovernanceEvidence, GovernanceIssue, GovernancePermission, GovernancePullRequestResult, Project, ProjectObservation, SyncSnapshot } from '../shared/types.js';
 import { governanceMarker, ProviderError, type Provider, type UserCredentials } from './github.js';
 import { Store } from './db.js';
 import { encrypt } from './auth.js';
@@ -75,6 +75,12 @@ export class FakeProvider implements Provider {
     const policy = this.data.context?.documents['AGENTS.md'];
     if (!policy) throw new ProviderError('FAKE governance policy unavailable', 404);
     return { integration_sha: this.data.integration_sha!, policy: { sha: policy.blob_sha, content: policy.content, missing: policy.missing, truncated: policy.truncated } };
+  }
+
+  async governanceRepositoryContext(_project: Project, integrationSha: string): Promise<ContextSnapshot> {
+    if (this.failure) throw this.failure;
+    if (!this.data.context || this.data.integration_sha !== integrationSha) throw new ProviderError('FAKE repository context unavailable', 409);
+    return { ...this.data.context, sha: integrationSha, codebase_complete: true };
   }
 
   async governanceEvidence(project: Project, number: number, expected: 'merged' | 'open' = 'merged'): Promise<GovernanceEvidence> {

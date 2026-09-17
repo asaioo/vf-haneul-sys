@@ -17,6 +17,7 @@ export interface Provider {
   governancePermission?(login: string): Promise<GovernancePermission>;
   governanceBaseline?(project: Project): Promise<{ integration_sha: string; policy_sha: string | null }>;
   governancePolicy?(project: Project): Promise<{ integration_sha: string; policy: GovernanceEvidence['policy'] }>;
+  governanceRepositoryContext?(project: Project, integrationSha: string): Promise<ContextSnapshot>;
   createGovernanceBranch?(name: string, baseSha: string): Promise<GovernanceBranch>;
   updateGovernancePolicy?(branch: string, policySha: string, content: string): Promise<{ sha: string }>;
   governanceDiff?(branch: string, baseSha: string): Promise<GovernanceDiff>;
@@ -77,6 +78,12 @@ export function governancePathExcluded(path: string): boolean {
   if (/(^|[/])(node_modules|dist|build|coverage|out|generated|vendor)([/]|$)/i.test(normalized)) return true;
   if (/(^|[/])(.env(?:[.].*)?|.*(?:secret|credential|token|password).*|.*[.](?:pem|key|p12|pfx|crt|cer|jks))$/i.test(normalized)) return true;
   return /[.](?:png|jpe?g|gif|webp|ico|pdf|zip|gz|bz2|7z|tar|wasm|exe|dll|so|dylib|class|jar|bin|db|sqlite|lock)$/i.test(normalized);
+}
+
+function repositoryContextPath(path: string): boolean {
+  if (governancePathExcluded(path)) return false;
+  const name = path.split('/').at(-1) ?? path;
+  return /^(Dockerfile|Makefile|Procfile)$/i.test(name) || /[.](?:c|cc|cpp|cs|css|go|h|hpp|html|java|js|jsx|json|kt|kts|md|mjs|cjs|php|proto|py|rb|rs|sh|sql|swift|toml|ts|tsx|vue|xml|ya?ml)$/i.test(name);
 }
 
 export function applicableScopedPolicies(paths: string[], inventory: Set<string>): string[] {
@@ -353,30 +360,40 @@ export class GitHubProvider implements Provider {
     return { node_id: nodeId, number: node.number == null ? null : Number(node.number), title: String(node.title ?? ''), url: String(node.url ?? ''), status_field_id: String(statusField.id), status_field_name: String(statusField.name), status_options: Array.isArray(statusField.options) ? statusField.options.filter((option: Json) => option?.id && option?.name != null).map((option: Json) => ({ id: String(option.id), name: String(option.name) })) : [], items, fetched_at: Date.now() };
   }
 
-  private async context(root: string, head: string, token: string): Promise<ContextSnapshot> {
+  private async context(root: string, head: string, token: string, fullCodebase = false): Promise<ContextSnapshot> {
     const { data: tree } = await this.request(`${root}/git/trees/${head}?recursive=1`, token, 'GET', undefined, true);
     if (!Array.isArray(tree?.tree)) throw new ProviderError('Invalid tree response');
     const inventory = tree.tree.slice(0, 10_000).map((value: Json) => ({ path: String(value.path), type: String(value.type), sha: String(value.sha) }));
-    const snapshot: ContextSnapshot = { sha: head, fetched_at: Date.now(), documents: {}, inventory, manifests: inventory.filter((value: { path: string }) => /(^|\/)(package.json|Cargo.toml|go.mod|pyproject.toml|pom.xml|Gemfile)$/.test(value.path)).map((value: { path: string }) => value.path), scoped_policies: inventory.filter((value: { path: string }) => value.path.endsWith('/AGENTS.md')).map((value: { path: string }) => value.path), truncated: !!tree.truncated || tree.tree.length > 10_000, warnings: ['Observed inventory, not inferred architecture. Not a complete execution contract.'] };
-    for (const name of ['AGENTS.md', 'PROJECT.md', 'ARCHITECTURE.md', 'DOMAIN.md']) {
+    const snapshot: ContextSnapshot = { sha: head, fetched_at: Date.now(), codebase_complete: false, documents: {}, inventory, manifests: inventory.filter((value: { path: string }) => /(^|\/)(package.json|Cargo.toml|go.mod|pyproject.toml|pom.xml|Gemfile)$/.test(value.path)).map((value: { path: string }) => value.path), scoped_policies: inventory.filter((value: { path: string }) => value.path.endsWith('/AGENTS.md')).map((value: { path: string }) => value.path), truncated: !!tree.truncated || tree.tree.length > 10_000, warnings: [] };
+    const roots = ['AGENTS.md', 'PROJECT.md', 'ARCHITECTURE.md', 'DOMAIN.md'];
+    const sourcePaths = fullCodebase ? inventory.filter((entry: { path: string; type: string }) => entry.type === 'blob' && repositoryContextPath(entry.path)).map((entry: { path: string }) => entry.path) : [];
+    const paths = [...new Set([...roots, ...snapshot.manifests, ...snapshot.scoped_policies, ...sourcePaths])];
+    const pathLimit = fullCodebase ? 300 : 100;
+    if (paths.length > pathLimit) { snapshot.truncated = true; snapshot.warnings.push('Repository has too many context files for the bounded codebase snapshot'); }
+    let aggregate = 0;
+    for (const name of paths.slice(0, pathLimit)) {
       try {
-        const { data } = await this.request(`${root}/contents/${name}?ref=${head}`, token, 'GET', undefined, true);
-        if (data.type !== 'file') throw new ProviderError('Root context path is not a regular file');
-        const tooBig = data.size > 1024 * 1024;
+        const encoded = name.split('/').map(encodeURIComponent).join('/');
+        const { data } = await this.request(`${root}/contents/${encoded}?ref=${head}`, token, 'GET', undefined, true);
+        if (data.type !== 'file') throw new ProviderError('Context path is not a regular file');
+        const tooBig = data.size > 256 * 1024;
         let content: string | null = null;
         if (!tooBig) {
           if (data.encoding !== 'base64' || typeof data.content !== 'string') throw new ProviderError('Context content unavailable');
           const bytes = Buffer.from(data.content, 'base64');
-          if (bytes.length !== data.size || bytes.length > 1024 * 1024) throw new ProviderError('Incomplete context document');
+          if (bytes.length !== data.size) throw new ProviderError('Incomplete context document');
+          if (aggregate + bytes.length > 1024 * 1024) { snapshot.truncated = true; snapshot.warnings.push('Repository context exceeds 1 MiB; remaining content is omitted'); continue; }
+          aggregate += bytes.length;
           content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
         }
         snapshot.documents[name] = { blob_sha: sha(data.sha), content, missing: false, truncated: tooBig };
-        if (tooBig) snapshot.warnings.push(`${name} exceeds 1 MiB; body omitted`);
+        if (tooBig) { snapshot.truncated = true; snapshot.warnings.push(`${name} exceeds 256 KiB; body omitted`); }
       } catch (error) {
-        if (error instanceof ProviderError && error.status === 404) { snapshot.documents[name] = { blob_sha: '', content: null, missing: true, truncated: false }; if (name === 'AGENTS.md') snapshot.warnings.push('Root AGENTS.md is missing'); }
+        if (roots.includes(name) && error instanceof ProviderError && error.status === 404) { snapshot.documents[name] = { blob_sha: '', content: null, missing: true, truncated: false }; if (name === 'AGENTS.md') snapshot.warnings.push('Root AGENTS.md is missing'); }
         else throw error;
       }
     }
+    snapshot.codebase_complete = fullCodebase && !snapshot.truncated;
     if (snapshot.truncated) snapshot.warnings.push('Repository inventory is truncated');
     return snapshot;
   }
@@ -559,6 +576,12 @@ export class GitHubProvider implements Provider {
   async governancePolicy(project: Project): Promise<{ integration_sha: string; policy: GovernanceEvidence['policy'] }> {
     const base = await this.governanceBase(project);
     return { integration_sha: base.integrationSha, policy: base.policy };
+  }
+
+  async governanceRepositoryContext(project: Project, integrationSha: string): Promise<ContextSnapshot> {
+    const base = await this.governanceBase(project);
+    if (base.integrationSha !== integrationSha) throw new ProviderError('Integration branch moved before repository context collection', 409);
+    return this.context(base.root, integrationSha, base.token, true);
   }
 
   async governanceEvidence(project: Project, number: number, expected: 'merged' | 'open' = 'merged'): Promise<GovernanceEvidence> {

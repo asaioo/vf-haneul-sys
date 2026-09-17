@@ -53,6 +53,14 @@ export async function buildApp(cfg:Config,s:Store,provider:Provider,options:{wor
     if(key) {const old=s.db.prepare('SELECT * FROM idempotency WHERE key=? AND expires>?').get(route,Date.now()) as any;if(old){if(old.digest!==digest)throw new ApiError(409,'Idempotency key reused with different content');return JSON.parse(old.result);}}
     const value=fn();if(key)s.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET digest=excluded.digest,result=excluded.result,expires=excluded.expires').run(route,digest,JSON.stringify(value),Date.now()+7*86400_000);return value;
   });
+  app.get('/api/governance/context',async()=>s.get('repository_context',`repository:${cfg.repoId}`)??null);
+  app.put('/api/governance/context',async req=>mutate(req,()=>{
+    admin(req.actor);
+    const body=z.strictObject({baseline_sha:z.string().regex(/^[a-f0-9]{40}$/),revision:z.number().int().nonnegative(),user_note:z.string().max(8_000)}).parse(req.body);
+    const id=`repository:${cfg.repoId}`,current=requireValue(s.get('repository_context',id),'Repository context has not been generated yet');
+    if(current.baseline_sha!==body.baseline_sha||current.revision!==body.revision)throw new ApiError(409,'Repository context changed');
+    current.user_note=body.user_note;current.revision++;current.updated_at=Date.now();s.put('repository_context',id,current);s.audit(req.actor.id,'repository_context.corrected',id,{baseline_sha:current.baseline_sha,revision:current.revision});return current;
+  }));
   const nativeMode=()=>isNative(s,cfg);
   const rejectLegacyWrite=()=>{throw new ApiError(410,nativeMessage);};
   app.get('/api/issues',async req=>{

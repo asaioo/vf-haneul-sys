@@ -144,7 +144,8 @@ export interface GitHubComment {
   updated_at: number;
 }
 
-export interface ContextSnapshot { sha: string; fetched_at: number; documents: Record<string, { blob_sha: string; content: string | null; missing: boolean; truncated: boolean }>; inventory: { path: string; type: string; sha: string }[]; manifests: string[]; scoped_policies: string[]; truncated: boolean; warnings: string[]; }
+export interface ContextSnapshot { sha: string; fetched_at: number; codebase_complete?: boolean; documents: Record<string, { blob_sha: string; content: string | null; missing: boolean; truncated: boolean }>; inventory: { path: string; type: string; sha: string }[]; manifests: string[]; scoped_policies: string[]; truncated: boolean; warnings: string[]; }
+export interface RepositoryContextDocument { id: string; repo_id: string; baseline_sha: string; markdown: string; user_note: string; revision: number; generated_at: number; updated_at: number; }
 export interface SyncSnapshot {
   changes: Change[];
   branches: string[];

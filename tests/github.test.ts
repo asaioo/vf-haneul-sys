@@ -55,6 +55,14 @@ test('real HTTP provider uses scoped App token, canonical merge membership and i
   const token=fixture.calls.find(c=>c.url.includes('/access_tokens'))!;assert.deepEqual(token.body.repository_ids,[101]);assert.deepEqual(token.body.permissions,{contents:'read',pull_requests:'read',metadata:'read',issues:'write',organization_projects:'read'});assert.equal(token.headers.Authorization.split('.').length,3);
   assert.ok(fixture.calls.some(c=>c.url.includes(`/commits/${head}/pulls`)));assert.ok(fixture.calls.filter(c=>c.url.includes('/contents/')).every(c=>c.url.includes(`ref=${head}`)));
 });
+
+test('first governance request captures a complete bounded codebase context at the pinned SHA', async () => {
+  const fixture = transport();
+  const context = await new GitHubProvider(cfg, fixture.http).governanceRepositoryContext(project, head);
+  assert.equal(context.codebase_complete, true);
+  assert.equal(context.sha, head);
+  assert.match(context.documents['AGENTS.md'].content!, /untrusted/);
+});
 test('direct integration commits are distinct and author email mapping is not authorization',async()=>{
   const f=transport({direct:true});const gh=new GitHubProvider(cfg,f.http);const result=await gh.snapshot(project,[]);const c=result.changes.find(c=>c.kind==='direct_commit')!;
   assert.equal(c.head_sha,direct);assert.equal(c.actor,null);assert.equal(c.commits[0].actor,'1');
