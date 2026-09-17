@@ -2,7 +2,7 @@ services:
   vf-kapo:
     build:
       context: .
-    image: vf-kapo:0.1.0
+    image: vf-kapo-pi:0.1.0
     init: true
     restart: unless-stopped
     env_file:

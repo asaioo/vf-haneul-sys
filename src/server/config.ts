@@ -20,6 +20,7 @@ export interface Config {
   bootstrapIds: string[];
   prefix: string;
   governanceEnabled?: boolean;
+  governanceEngine: 'direct' | 'pi';
   governanceModelApiKey?: string;
   governanceModelBaseUrl?: string;
   governanceModel?: string;
@@ -80,6 +81,7 @@ export function config(env = process.env, demo = process.argv.includes('--demo')
     bootstrapIds: (demo ? '1' : required('BOOTSTRAP_GITHUB_IDS')).split(',').map(v => v.trim()).filter(Boolean),
     prefix: env.TASK_PREFIX ?? 'TASK',
     governanceEnabled: flag('GOVERNANCE_ENABLED', flag('GOVERNANCE_MODEL_ENABLED', false)),
+    governanceEngine: env.GOVERNANCE_ENGINE === 'pi' ? 'pi' : 'direct',
     governanceModelApiKey: env.GOVERNANCE_MODEL_API_KEY ?? env.OPENAI_API_KEY ?? '',
     governanceModelBaseUrl: governanceModelBaseUrl.replace(/\/$/, ''),
     governanceModel: env.GOVERNANCE_MODEL ?? env.OPENAI_MODEL ?? '',
@@ -91,5 +93,6 @@ export function config(env = process.env, demo = process.argv.includes('--demo')
   if (!demo && c.webhookSecret.length < 32) throw new Error('Webhook secret must be at least 32 characters');
   if (![c.repoId, c.installationId, c.appId, ...c.bootstrapIds].every(v => /^\d+$/.test(v))) throw new Error('GitHub identities must be numeric IDs');
   if (!c.governanceAgentLogins.every(value => /^[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/.test(value))) throw new Error('Invalid GOVERNANCE_AGENT_LOGINS');
+  if (env.GOVERNANCE_ENGINE && !['direct', 'pi'].includes(env.GOVERNANCE_ENGINE)) throw new Error('GOVERNANCE_ENGINE must be direct or pi');
   return c;
 }

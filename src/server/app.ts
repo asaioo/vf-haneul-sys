@@ -13,6 +13,7 @@ import { coordinate, issueReferences } from './coordinator.js';
 import type { Provider } from './github.js';
 import { edgeReviewTrigger, GovernanceService, governanceTrigger, GOVERNANCE_JOB } from './governance.js';
 import { OpenAIModelClient, type GovernanceModelClient } from './model.js';
+import { PiGovernanceModel } from './pi-model.js';
 import { changeDetail, completion, createTask, explain, linkTask, patchTask, taskByKey, taskDetail, taskStatus, text } from './tasks.js';
 import { Worker } from './worker.js';
 const params=(r:FastifyRequest)=>r.params as Record<string,string>;
@@ -26,7 +27,7 @@ export async function buildApp(cfg:Config,s:Store,provider:Provider,options:{wor
   if(cfg.demo&&(cfg.production||cfg.host!=='127.0.0.1'))throw new Error('Unsafe demo configuration');
   const app=Fastify({bodyLimit:1024*1024,logger:false,trustProxy:false,routerOptions:{maxParamLength:700}});
   await app.register(cookie);await app.register(rateLimit,{max:240,timeWindow:'1 minute'});
-  const auth=new Auth(s,cfg,provider),governance=new GovernanceService(s,provider,cfg,options.model??new OpenAIModelClient({enabled:cfg.governanceEnabled??false,apiKey:cfg.governanceModelApiKey??'',baseUrl:cfg.governanceModelBaseUrl,model:cfg.governanceModel??'',privateCodeOptIn:cfg.governancePrivateCodeOptIn??false,disableThinking:cfg.governanceModelDisableThinking})),worker=new Worker(s,provider,governance);
+  const auth=new Auth(s,cfg,provider),modelSettings={enabled:cfg.governanceEnabled??false,apiKey:cfg.governanceModelApiKey??'',baseUrl:cfg.governanceModelBaseUrl,model:cfg.governanceModel??'',privateCodeOptIn:cfg.governancePrivateCodeOptIn??false,disableThinking:cfg.governanceModelDisableThinking},governanceModel=options.model??(cfg.governanceEngine==='pi'?new PiGovernanceModel(modelSettings):new OpenAIModelClient(modelSettings)),governance=new GovernanceService(s,provider,cfg,governanceModel),worker=new Worker(s,provider,governance);
   app.addHook('onRequest',async(req,reply)=>{
     reply.header('X-Content-Type-Options','nosniff').header('Referrer-Policy','no-referrer').header('Cache-Control','no-store').header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     if(cfg.demo&&req.headers.host&&!['127.0.0.1','localhost','[::1]'].includes(req.headers.host.replace(/:\d+$/,'')))throw new ApiError(403,'Demo requires loopback Host');
