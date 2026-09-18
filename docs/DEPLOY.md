@@ -85,4 +85,6 @@ The SQLite database lives in the named volume `vf-kapo-data`. Back up that volum
 
 Allow outbound HTTPS to GitHub and the configured model endpoint. GitHub must be able to reach the public HTTPS webhook URL. The provided Compose port is loopback-only, so direct Internet access to port 3000 is not expected.
 
+For a no-port-forwarding HTTPS setup, follow [CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md). It covers Quick Tunnel testing, stable named-tunnel setup, GitHub App URLs, startup, and troubleshooting.
+
 The deployed Main Agent uses the bounded direct OpenAI-compatible client. It receives no GitHub credential or write tool; strict server code revalidates its structured result and performs the bounded GitHub operation.
