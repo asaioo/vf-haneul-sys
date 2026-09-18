@@ -1,4 +1,5 @@
 .git
+.gitmodules
 .env
 .env.*
 !.env.example
@@ -7,6 +8,7 @@ dist
 data
 playwright-report
 test-results
+vendor/pi
 *.sqlite*
 *.pem
 *.key

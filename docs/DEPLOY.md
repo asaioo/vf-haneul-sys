@@ -5,9 +5,12 @@ This branch ships as a two-stage Docker image plus `compose.yaml`. The container
 ## 1. Initialize the checkout
 
 ```sh
+git submodule update --init --depth 1
 cp .env.production.example .env.production
 mkdir -p secrets
 ```
+
+The pinned `vendor/pi` submodule is the reviewable source reference. The matching exact npm package is the runtime artifact used by the image.
 
 ## 2. Put credentials in the correct places
 
@@ -87,4 +90,4 @@ Allow outbound HTTPS to GitHub and the configured model endpoint. GitHub must be
 
 For a no-port-forwarding HTTPS setup, follow [CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md). It covers Quick Tunnel testing, stable named-tunnel setup, GitHub App URLs, startup, and troubleshooting.
 
-The deployed Main Agent uses the bounded direct OpenAI-compatible client. It receives no GitHub credential or write tool; strict server code revalidates its structured result and performs the bounded GitHub operation.
+The initial deployment keeps `GOVERNANCE_ENGINE=direct`. After the direct path is verified, changing it to `pi` enables an ephemeral Pi SDK session with only `submit_review` exposed. Pi receives no shell, filesystem, GitHub token, extension, skill, persistent session, or write tool. Strict server code revalidates the structured result and performs the bounded GitHub operation.
